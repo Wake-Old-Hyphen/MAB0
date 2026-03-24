@@ -217,7 +217,7 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
         # Standard ReVanced command
         utils.run_process([
             "java", "-jar", str(cli),
-            "patch", "--patches", str(patches), "-b",
+            "patch", "--patches", str(patches),
             "--out", str(output_apk), str(input_apk),
             *exclude_patches, *include_patches
         ], stream=True)
