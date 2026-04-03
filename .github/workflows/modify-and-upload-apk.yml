@@ -51,7 +51,7 @@ jobs:
             const match = assets.find(a => {
               const n = (I cut off the workflow accidentally. Here's the full file again — complete and ready to copy as .github/workflows/modify-and-upload-apk.yml:
 
-```yaml
+
 name: Modify x piko APK and upload
 
 on:
