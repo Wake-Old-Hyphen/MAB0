@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget unzip openjdk-11-jdk xmlstarlet zipalign apksigner
+          sudo apt-get install -y wget unzip openjdk-11-jdk xmlstarlet zipalign && true
         shell: bash
 
       - name: Set up Java
@@ -46,15 +46,16 @@ jobs:
               repo: context.repo.repo
             }).then(r => r.data).catch(e => { core.setFailed('No latest release'); throw e});
             core.info(`Found release: ${release.tag_name}`);
-            const assets = release.assets;
+            const assets = release.assets || [];
             const match = assets.find(a => {
-              const n = a.name.toLowerCase();
+              const n = (a.name || '').toLowerCase();
               return n.includes('x piko') || n.includes('xpiko') || n.includes('x_piko');
             });
             if (!match) {
               core.setFailed('No release asset matching \"x piko\" found.');
+            } else {
+              return { url: match.browser_download_url, name: match.name, release_id: release.id, release_tag: release.tag_name };
             }
-            return { url: match.browser_download_url, name: match.name, release_id: release.id, release_tag: release.tag_name };
 
       - name: Download matched asset
         run: |
@@ -88,7 +89,6 @@ jobs:
           cp "$APK_IN" "$TEMP_DIR/app.apk"
           cd "$TEMP_DIR"
 
-          # decode APK
           java -jar "$TOOLS_DIR/apktool.jar" d -f app.apk -o decoded
 
           MANIFEST="decoded/AndroidManifest.xml"
@@ -96,12 +96,10 @@ jobs:
             echo "Manifest not found"; exit 1
           fi
 
-          # Extract package name and sdk nodes if present
           PACKAGE=$(xmlstarlet sel -t -v "/manifest/@package" decoded/AndroidManifest.xml 2>/dev/null || echo "com.modified.app")
           MINSDK=$(xmlstarlet sel -t -v "/manifest/uses-sdk/@android:minSdkVersion" decoded/AndroidManifest.xml 2>/dev/null || true)
           TARGETSDK=$(xmlstarlet sel -t -v "/manifest/uses-sdk/@android:targetSdkVersion" decoded/AndroidManifest.xml 2>/dev/null || true)
 
-          # Build new manifest header with allowed permissions
           cat > "$MANIFEST.tmp" <<MAN
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
@@ -125,16 +123,13 @@ MAN
             <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 PERMS
 
-          # Append application node from original manifest
           xmlstarlet sel -t -c "/manifest/application" decoded/AndroidManifest.xml >> "$MANIFEST.tmp"
           echo "</manifest>" >> "$MANIFEST.tmp"
 
           mv "$MANIFEST.tmp" "$MANIFEST"
 
-          # rebuild
           java -jar "$TOOLS_DIR/apktool.jar" b decoded -o rebuilt.apk
 
-          # align (zipalign may be available as 'zipalign' in build-tools; try to use if present)
           if command -v zipalign >/dev/null 2>&1; then
             zipalign -v -p 4 rebuilt.apk aligned.apk || cp rebuilt.apk aligned.apk
           else
@@ -144,7 +139,6 @@ PERMS
           OUTPUT_APK="$OUT_DIR/modified-$(basename "$APK_IN")"
 
           if [ -n "$KEYSTORE_PATH" ] && [ -f "$KEYSTORE_PATH" ]; then
-            # sign with apksigner if present
             if command -v apksigner >/dev/null 2>&1; then
               apksigner sign --ks "$KEYSTORE_PATH" --ks-pass pass:"$KEYSTORE_PASS" --key-pass pass:"$KEY_PASS" --out "$OUTPUT_APK" aligned.apk --ks-key-alias "$KEY_ALIAS"
             else
@@ -165,7 +159,7 @@ PERMS
           ./scripts/modify_apk.sh "downloads/${{ steps.find_asset.outputs.name }}" out tools signing.keystore "${{ secrets.KEYSTORE_PASSWORD }}" "${{ secrets.KEY_ALIAS }}" "${{ secrets.KEY_PASSWORD }}" || ./scripts/modify_apk.sh "downloads/${{ steps.find_asset.outputs.name }}" out tools "" "" "" ""
         shell: bash
 
-      - name: Create a new release tag (if desired)
+      - name: Create a new release
         id: create_rel
         uses: actions/github-script@v7
         with:
@@ -178,13 +172,13 @@ PERMS
               name: tag,
               body: 'Modified x piko APK with restricted permissions'
             });
-            return { upload_url: rel.data.upload_url, id: rel.data.id };
+            return { upload_url: rel.data.upload_url };
 
       - name: Upload modified APK to release
         uses: actions/upload-release-asset@v1
         with:
           upload_url: ${{ steps.create_rel.outputs.upload_url }}
-          asset_path: out/modified-downloads-${{ steps.find_asset.outputs.name }} || out/modified-${{ steps.find_asset.outputs.name }}
+          asset_path: out/modified-${{ steps.find_asset.outputs.name }}
           asset_name: modified-${{ steps.find_asset.outputs.name }}
           asset_content_type: application/vnd.android.package-archive
         env:
