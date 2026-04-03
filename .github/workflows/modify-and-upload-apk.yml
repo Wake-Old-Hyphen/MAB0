@@ -49,6 +49,136 @@ jobs:
             core.info(`Found release: ${release.tag_name}`);
             const assets = release.assets || [];
             const match = assets.find(a => {
+              const n = (I cut off the workflow accidentally. Here's the full file again — complete and ready to copy as .github/workflows/modify-and-upload-apk.yml:
+
+```yaml
+name: Modify x piko APK and upload
+
+on:
+  workflow\_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  modify-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip openjdk-11-jdk xmlstarlet zipalign && true
+        shell: bash
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Download apktool
+        run: |
+          mkdir -p tools
+          wget -q -O tools/apktool.jar https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/apktool.jar
+          wget -q -O tools/apktool https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
+          chmod +x tools/apktool
+        shell: bash
+
+      - name: Find latest release and asset named like 'x piko'
+        id: find\_asset
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const release = await github.rest.repos.getLatestRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            }).then(r => r.data).catch(e => { core.setFailed('No latest release'); throw e});
+            core.info(`Found release: ${release.tag_name}`);
+            const assets = release.assets || [];
+            const match = assets.find(a => {
+              const n = (a.name || '').toLowerCase();
+              return n.includes('x piko') || n.includes('xpiko') || n.includes('x\_piko');
+            });
+            if (!match) {
+              core.setFailed('No release asset matching "x piko" found.');
+            } else {
+              return { url: match.browser\_download\_url, name: match.name, release\_id: release.id, release\_tag: release.tag\_name };
+            }
+
+      - name: Download matched asset
+        run: |
+          mkdir -p downloads
+          curl -L "\${{ steps.find\_asset.outputs.url }}" -o "downloads/\${{ steps.find\_asset.outputs.name }}"
+        shell: bash
+
+      - name: Prepare keystore (optional)
+        run: |
+          if [ -n "\${{ secrets.KEYSTORE\_BASE64 }}" ]; then
+            echo "\${{ secrets.KEYSTORE\_BASE64 }}" | base64 --decode > signing.keystore
+            chmod 600 signing.keystore
+          else
+            echo "KEYSTORE\_BASE64 empty — skipping keystore setup"
+          fi
+        shell: bash
+
+      - name: Ensure modify script exists
+        run: |
+          ls -la scripts/modify\_apk.sh
+          chmod +x scripts/modify\_apk.sh
+        shell: bash
+
+      - name: Run modification
+        run: |
+          mkdir -p out
+          ./scripts/modify\_apk.sh "downloads/\${{ steps.find\_asset.outputs.name }}" out tools signing.keystore "\${{ secrets.KEYSTORE\_PASSWORD }}" "\${{ secrets.KEY\_ALIAS }}" "\${{ secrets.KEY\_PASSWORD }}" || ./scripts/modify\_apk.sh "downloads/\${{ steps.find\_asset.outputs.name }}" out tools "" "" "" ""
+        shell: bash
+
+      - name: Create a new release
+        id: create\_rel
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = `modified-${new Date().toISOString().replace(/[:.]/g,'-')}`;
+            const rel = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag\_name: tag,
+              name: tag,
+              body: 'Modified x piko APK with restricted permissions'
+            });
+            return { upload\_url: rel.data.upload\_url };
+
+      - name: Upload modified APK to release
+        uses: actions/upload-release-asset@v1
+        with:
+          upload\_url: \${{ steps.create\_rel.outputs.upload\_url }}
+          asset\_path: out/modified-\${{ steps.find\_asset.outputs.name }}
+          asset\_name: modified-\${{ steps.find\_asset.outputs.name }}
+          asset\_content\_type: application/vnd.android.package-archive
+        env:
+          GITHUB\_TOKEN: \${{ secrets.GITHUB\_TOKEN }}
+          chmod +x tools/apktool
+        shell: bash
+
+      - name: Find latest release and asset named like 'x piko'
+        id: find_asset
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const release = await github.rest.repos.getLatestRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            }).then(r => r.data).catch(e => { core.setFailed('No latest release'); throw e});
+            core.info(`Found release: ${release.tag_name}`);
+            const assets = release.assets || [];
+            const match = assets.find(a => {
               const n = (a.name || '').toLowerCase();
               return n.includes('x piko') || n.includes('xpiko') || n.includes('x_piko');
             });
