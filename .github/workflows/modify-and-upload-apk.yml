@@ -1,0 +1,191 @@
+name: Modify x piko APK and upload
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  modify-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip openjdk-11-jdk xmlstarlet zipalign apksigner
+        shell: bash
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Download apktool
+        run: |
+          mkdir -p tools
+          wget -q -O tools/apktool.jar https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/apktool.jar
+          wget -q -O tools/apktool https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
+          chmod +x tools/apktool
+
+      - name: Find latest release and asset named like 'x piko'
+        id: find_asset
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const release = await github.rest.repos.getLatestRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            }).then(r => r.data).catch(e => { core.setFailed('No latest release'); throw e});
+            core.info(`Found release: ${release.tag_name}`);
+            const assets = release.assets;
+            const match = assets.find(a => {
+              const n = a.name.toLowerCase();
+              return n.includes('x piko') || n.includes('xpiko') || n.includes('x_piko');
+            });
+            if (!match) {
+              core.setFailed('No release asset matching \"x piko\" found.');
+            }
+            return { url: match.browser_download_url, name: match.name, release_id: release.id, release_tag: release.tag_name };
+
+      - name: Download matched asset
+        run: |
+          mkdir -p downloads
+          curl -L "${{ steps.find_asset.outputs.url }}" -o "downloads/${{ steps.find_asset.outputs.name }}"
+        shell: bash
+
+      - name: Prepare keystore (optional)
+        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > signing.keystore
+          chmod 600 signing.keystore
+        shell: bash
+
+      - name: Add modify script
+        run: |
+          mkdir -p scripts
+          cat > scripts/modify_apk.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          APK_IN="$1"
+          OUT_DIR="$2"
+          TOOLS_DIR="$3"
+          KEYSTORE_PATH="$4"
+          KEYSTORE_PASS="$5"
+          KEY_ALIAS="$6"
+          KEY_PASS="$7"
+
+          mkdir -p "$OUT_DIR"
+          TEMP_DIR=$(mktemp -d)
+          cp "$APK_IN" "$TEMP_DIR/app.apk"
+          cd "$TEMP_DIR"
+
+          # decode APK
+          java -jar "$TOOLS_DIR/apktool.jar" d -f app.apk -o decoded
+
+          MANIFEST="decoded/AndroidManifest.xml"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "Manifest not found"; exit 1
+          fi
+
+          # Extract package name and sdk nodes if present
+          PACKAGE=$(xmlstarlet sel -t -v "/manifest/@package" decoded/AndroidManifest.xml 2>/dev/null || echo "com.modified.app")
+          MINSDK=$(xmlstarlet sel -t -v "/manifest/uses-sdk/@android:minSdkVersion" decoded/AndroidManifest.xml 2>/dev/null || true)
+          TARGETSDK=$(xmlstarlet sel -t -v "/manifest/uses-sdk/@android:targetSdkVersion" decoded/AndroidManifest.xml 2>/dev/null || true)
+
+          # Build new manifest header with allowed permissions
+          cat > "$MANIFEST.tmp" <<MAN
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="$PACKAGE">
+MAN
+
+          if [ -n "$MINSDK" ] || [ -n "$TARGETSDK" ]; then
+            echo -n "  <uses-sdk" >> "$MANIFEST.tmp"
+            [ -n "$MINSDK" ] && echo -n " android:minSdkVersion=\"$MINSDK\"" >> "$MANIFEST.tmp"
+            [ -n "$TARGETSDK" ] && echo -n " android:targetSdkVersion=\"$TARGETSDK\"" >> "$MANIFEST.tmp"
+            echo " />" >> "$MANIFEST.tmp"
+          fi
+
+          cat >> "$MANIFEST.tmp" <<PERMS
+            <uses-permission android:name="android.permission.INTERNET" />
+            <uses-permission android:name="android.permission.WAKE_LOCK" />
+            <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+            <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+            <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+PERMS
+
+          # Append application node from original manifest
+          xmlstarlet sel -t -c "/manifest/application" decoded/AndroidManifest.xml >> "$MANIFEST.tmp"
+          echo "</manifest>" >> "$MANIFEST.tmp"
+
+          mv "$MANIFEST.tmp" "$MANIFEST"
+
+          # rebuild
+          java -jar "$TOOLS_DIR/apktool.jar" b decoded -o rebuilt.apk
+
+          # align (zipalign may be available as 'zipalign' in build-tools; try to use if present)
+          if command -v zipalign >/dev/null 2>&1; then
+            zipalign -v -p 4 rebuilt.apk aligned.apk || cp rebuilt.apk aligned.apk
+          else
+            cp rebuilt.apk aligned.apk
+          fi
+
+          OUTPUT_APK="$OUT_DIR/modified-$(basename "$APK_IN")"
+
+          if [ -n "$KEYSTORE_PATH" ] && [ -f "$KEYSTORE_PATH" ]; then
+            # sign with apksigner if present
+            if command -v apksigner >/dev/null 2>&1; then
+              apksigner sign --ks "$KEYSTORE_PATH" --ks-pass pass:"$KEYSTORE_PASS" --key-pass pass:"$KEY_PASS" --out "$OUTPUT_APK" aligned.apk --ks-key-alias "$KEY_ALIAS"
+            else
+              jarsigner -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASS" -keypass "$KEY_PASS" aligned.apk "$KEY_ALIAS"
+              cp aligned.apk "$OUTPUT_APK"
+            fi
+          else
+            cp aligned.apk "$OUTPUT_APK"
+          fi
+
+          echo "$OUTPUT_APK"
+          EOF
+          chmod +x scripts/modify_apk.sh
+
+      - name: Run modification
+        run: |
+          mkdir -p out
+          ./scripts/modify_apk.sh "downloads/${{ steps.find_asset.outputs.name }}" out tools signing.keystore "${{ secrets.KEYSTORE_PASSWORD }}" "${{ secrets.KEY_ALIAS }}" "${{ secrets.KEY_PASSWORD }}" || ./scripts/modify_apk.sh "downloads/${{ steps.find_asset.outputs.name }}" out tools "" "" "" ""
+        shell: bash
+
+      - name: Create a new release tag (if desired)
+        id: create_rel
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = `modified-${new Date().toISOString().replace(/[:.]/g,'-')}`;
+            const rel = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: tag,
+              body: 'Modified x piko APK with restricted permissions'
+            });
+            return { upload_url: rel.data.upload_url, id: rel.data.id };
+
+      - name: Upload modified APK to release
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_rel.outputs.upload_url }}
+          asset_path: out/modified-downloads-${{ steps.find_asset.outputs.name }} || out/modified-${{ steps.find_asset.outputs.name }}
+          asset_name: modified-${{ steps.find_asset.outputs.name }}
+          asset_content_type: application/vnd.android.package-archive
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
